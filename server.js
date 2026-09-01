@@ -1589,6 +1589,242 @@ app.get(
   },
 );
 
+// =====================================================
+// KPI - TOTAL PROFIT
+// READ-ONLY QUERY
+// =====================================================
+
+app.get(
+  "/api/workspaces/:workspaceId/datasets/:datasetId/kpi/total-profit",
+  async (req, res) => {
+    const { workspaceId, datasetId } = req.params;
+    const connectionId = req.query.connectionId;
+
+    console.log("=================================");
+    console.log("KPI: TOTAL PROFIT");
+    console.log("Workspace ID:", workspaceId);
+    console.log("Dataset ID:", datasetId);
+    console.log("Connection ID:", connectionId);
+    console.log("=================================");
+
+    if (!connectionId) {
+      return res.status(400).json({
+        success: false,
+        error: "Connection ID is missing.",
+      });
+    }
+
+    const connection = powerBiConnections.get(connectionId);
+
+    if (!connection) {
+      return res.status(401).json({
+        success: false,
+        error: "Invalid or expired PRISM AI connection.",
+      });
+    }
+
+    if (!connection.authenticated || !connection.accessToken) {
+      return res.status(401).json({
+        success: false,
+        error: "Power BI authentication required.",
+      });
+    }
+
+    try {
+      const daxQuery = `
+        EVALUATE
+        ROW(
+          "TotalProfit",
+          SUM('Orders'[Profit])
+        )
+      `;
+
+      console.log("Executing Total Profit DAX:");
+      console.log(daxQuery);
+
+      const response = await fetch(
+        `${POWER_BI_API}/groups/${workspaceId}/datasets/${datasetId}/executeQueries`,
+        {
+          method: "POST",
+
+          headers: {
+            Authorization: `Bearer ${connection.accessToken}`,
+            "Content-Type": "application/json",
+          },
+
+          body: JSON.stringify({
+            queries: [
+              {
+                query: daxQuery,
+              },
+            ],
+
+            serializerSettings: {
+              includeNulls: true,
+            },
+          }),
+        },
+      );
+
+      const responseText = await response.text();
+
+      console.log("Total Profit API status:", response.status);
+      console.log("Total Profit response:", responseText);
+
+      if (!response.ok) {
+        return res.status(response.status).json({
+          success: false,
+          error: "Unable to calculate Total Profit.",
+          powerBiStatus: response.status,
+          details: responseText,
+        });
+      }
+
+      const data = JSON.parse(responseText);
+
+      const totalProfit =
+        data?.results?.[0]?.tables?.[0]?.rows?.[0]?.["[TotalProfit]"];
+
+      console.log("TOTAL PROFIT VALUE:", totalProfit);
+      console.log("FULL POWER BI RESULT:", JSON.stringify(data, null, 2));
+
+      res.json({
+        success: true,
+        kpi: "Total Profit",
+        value: totalProfit,
+        readOnly: true,
+        daxQuery,
+      });
+    } catch (error) {
+      console.error("TOTAL PROFIT ERROR:", error);
+
+      res.status(500).json({
+        success: false,
+        error: "Failed to retrieve Total Profit.",
+        details: error.message,
+      });
+    }
+  },
+);
+
+// =====================================================
+// KPI - TOTAL ORDERS
+// READ-ONLY QUERY
+// =====================================================
+
+app.get(
+  "/api/workspaces/:workspaceId/datasets/:datasetId/kpi/total-orders",
+  async (req, res) => {
+    const { workspaceId, datasetId } = req.params;
+    const connectionId = req.query.connectionId;
+
+    console.log("=================================");
+    console.log("KPI: TOTAL ORDERS");
+    console.log("Workspace ID:", workspaceId);
+    console.log("Dataset ID:", datasetId);
+    console.log("Connection ID:", connectionId);
+    console.log("=================================");
+
+    if (!connectionId) {
+      return res.status(400).json({
+        success: false,
+        error: "Connection ID is missing.",
+      });
+    }
+
+    const connection = powerBiConnections.get(connectionId);
+
+    if (!connection) {
+      return res.status(401).json({
+        success: false,
+        error: "Invalid or expired PRISM AI connection.",
+      });
+    }
+
+    if (!connection.authenticated || !connection.accessToken) {
+      return res.status(401).json({
+        success: false,
+        error: "Power BI authentication required.",
+      });
+    }
+
+    try {
+      const daxQuery = `
+        EVALUATE
+        ROW(
+          "TotalOrders",
+          COUNTROWS('Orders')
+        )
+      `;
+
+      console.log("Executing Total Orders DAX:");
+      console.log(daxQuery);
+
+      const response = await fetch(
+        `${POWER_BI_API}/groups/${workspaceId}/datasets/${datasetId}/executeQueries`,
+        {
+          method: "POST",
+
+          headers: {
+            Authorization: `Bearer ${connection.accessToken}`,
+            "Content-Type": "application/json",
+          },
+
+          body: JSON.stringify({
+            queries: [
+              {
+                query: daxQuery,
+              },
+            ],
+
+            serializerSettings: {
+              includeNulls: true,
+            },
+          }),
+        },
+      );
+
+      const responseText = await response.text();
+
+      console.log("Total Orders API status:", response.status);
+      console.log("Total Orders response:", responseText);
+
+      if (!response.ok) {
+        return res.status(response.status).json({
+          success: false,
+          error: "Unable to calculate Total Orders.",
+          powerBiStatus: response.status,
+          details: responseText,
+        });
+      }
+
+      const data = JSON.parse(responseText);
+
+      const totalOrders =
+        data?.results?.[0]?.tables?.[0]?.rows?.[0]?.["[TotalOrders]"];
+
+      console.log("TOTAL ORDERS VALUE:", totalOrders);
+      console.log("FULL POWER BI RESULT:", JSON.stringify(data, null, 2));
+
+      res.json({
+        success: true,
+        kpi: "Total Orders",
+        value: totalOrders,
+        readOnly: true,
+        daxQuery,
+      });
+    } catch (error) {
+      console.error("TOTAL ORDERS ERROR:", error);
+
+      res.status(500).json({
+        success: false,
+        error: "Failed to retrieve Total Orders.",
+        details: error.message,
+      });
+    }
+  },
+);
+
 app.listen(PORT, () => {
   console.log("=================================");
 
