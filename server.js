@@ -1,11 +1,30 @@
+// const express = require("express");
+// const cors = require("cors");
+// const session = require("express-session");
+// const msal = require("@azure/msal-node");
+// const crypto = require("crypto");
+// require("dotenv").config();
+
 const express = require("express");
 const cors = require("cors");
 const session = require("express-session");
 const msal = require("@azure/msal-node");
 const crypto = require("crypto");
+const OpenAI = require("openai");
 require("dotenv").config();
 
 const app = express();
+
+// =====================================================
+// PRISM AI LLM - HUGGING FACE
+// =====================================================
+
+const llmClient = new OpenAI({
+  baseURL: "https://router.huggingface.co/v1",
+  apiKey: process.env.HF_TOKEN,
+});
+
+const LLM_MODEL = "Qwen/Qwen3-4B-Instruct-2507";
 
 // =====================================================
 // PRISM AI CONNECTION STORE
@@ -1824,6 +1843,125 @@ app.get(
     }
   },
 );
+
+// =====================================================
+// PRISM AI - LLM ASK
+// =====================================================
+
+app.post("/api/ask", async (req, res) => {
+  try {
+    const { question, context } = req.body;
+
+    console.log("=================================");
+    console.log("PRISM AI LLM REQUEST");
+    console.log("Question:", question);
+    console.log("=================================");
+
+    // -----------------------------------------
+    // VALIDATE QUESTION
+    // -----------------------------------------
+
+    if (!question || question.trim() === "") {
+      return res.status(400).json({
+        success: false,
+        error: "Question is required.",
+      });
+    }
+
+    // -----------------------------------------
+    // SYSTEM PROMPT
+    // -----------------------------------------
+
+    const systemPrompt = `
+You are Prism AI, an intelligent Business Intelligence assistant.
+
+You help users understand and analyze data from their Power BI semantic model.
+
+Your job is to answer the user's business question using ONLY the Power BI data and context provided to you.
+
+Rules:
+
+1. Give clear and concise answers.
+2. Use the provided Power BI data whenever relevant.
+3. Never invent numbers, dates, products, regions, or business facts.
+4. If the provided data is insufficient to answer the question, clearly say that more Power BI data is required.
+5. Explain calculations and comparisons in simple business language.
+6. Preserve numerical values accurately.
+7. If the user asks for a comparison, clearly identify both values and the difference.
+8. If the user asks for a percentage change, calculate it accurately when the required values are available.
+9. If the user asks for trends, summarize the trend using the provided data.
+10. If the user asks a question unrelated to the available Power BI data, explain that the information is not available in the current semantic model.
+11. Do not claim that you queried Power BI unless the context explicitly contains the query result.
+12. Do not make assumptions about missing data.
+
+You are a read-only BI assistant.
+`;
+
+    // -----------------------------------------
+    // USER PROMPT
+    // -----------------------------------------
+
+    const userPrompt = `
+User Question:
+${question}
+
+Power BI Context:
+${context || "No Power BI context was provided."}
+`;
+
+    // -----------------------------------------
+    // CALL QWEN3
+    // -----------------------------------------
+
+    const response = await llmClient.chat.completions.create({
+      model: LLM_MODEL,
+
+      messages: [
+        {
+          role: "system",
+          content: systemPrompt,
+        },
+        {
+          role: "user",
+          content: userPrompt,
+        },
+      ],
+
+      max_tokens: 300,
+    });
+
+    const answer = response?.choices?.[0]?.message?.content;
+
+    if (!answer) {
+      throw new Error("LLM returned an empty response.");
+    }
+
+    console.log("PRISM AI ANSWER:");
+    console.log(answer);
+    console.log("=================================");
+
+    // -----------------------------------------
+    // RETURN ANSWER
+    // -----------------------------------------
+
+    res.json({
+      success: true,
+      answer,
+      model: LLM_MODEL,
+    });
+  } catch (error) {
+    console.error("=================================");
+    console.error("PRISM AI LLM ERROR");
+    console.error(error);
+    console.error("=================================");
+
+    res.status(500).json({
+      success: false,
+      error: "LLM request failed.",
+      details: error.message,
+    });
+  }
+});
 
 app.listen(PORT, () => {
   console.log("=================================");
