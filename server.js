@@ -11,9 +11,20 @@ const session = require("express-session");
 const msal = require("@azure/msal-node");
 const crypto = require("crypto");
 const OpenAI = require("openai");
+const powerBiConnections = new Map();
 require("dotenv").config();
 
 const app = express();
+
+// =====================================================
+// PRISM AI - SCHEMA CACHE
+// =====================================================
+
+const prismSchemaCache = new Map();
+
+function getSchemaCacheKey(workspaceId, datasetId) {
+  return `${workspaceId}:${datasetId}`;
+}
 
 // =====================================================
 // PRISM AI LLM - HUGGING FACE
@@ -38,7 +49,7 @@ const LLM_MODEL = "Qwen/Qwen3-4B-Instruct-2507";
 //     accessToken
 // }
 
-const powerBiConnections = new Map();
+// const powerBiConnections = new Map();
 
 // =====================================================
 // BASIC EXPRESS CONFIGURATION
@@ -1208,21 +1219,27 @@ app.get(
 // READ-ONLY SEMANTIC MODEL SCHEMA TEST
 // =====================================================
 
+// =====================================================
+// PRISM AI - REAL SEMANTIC MODEL SCHEMA DISCOVERY
+// =====================================================
+
 app.get(
   "/api/workspaces/:workspaceId/datasets/:datasetId/schema",
   async (req, res) => {
     const { workspaceId, datasetId } = req.params;
-
     const connectionId = req.query.connectionId;
 
     console.log("=================================");
-    console.log("PRISM AI - SCHEMA TEST");
+    console.log("PRISM AI - REAL SCHEMA DISCOVERY");
     console.log("Workspace ID:", workspaceId);
     console.log("Dataset ID:", datasetId);
     console.log("Connection ID:", connectionId);
     console.log("=================================");
 
-    // Check connection ID
+    // -------------------------------------------------
+    // VALIDATION
+    // -------------------------------------------------
+
     if (!connectionId) {
       return res.status(400).json({
         success: false,
@@ -1230,10 +1247,8 @@ app.get(
       });
     }
 
-    // Get connection
     const connection = powerBiConnections.get(connectionId);
 
-    // Check authentication
     if (!connection || !connection.authenticated || !connection.accessToken) {
       return res.status(401).json({
         success: false,
@@ -1242,108 +1257,313 @@ app.get(
     }
 
     try {
-      // -----------------------------------------
-      // READ-ONLY TEST QUERY
-      // -----------------------------------------
+      // -------------------------------------------------
+      // STEP 1 - GET DATASET METADATA
+      // -------------------------------------------------
 
-      const daxQuery = `
-        EVALUATE
-        ROW(
-          "PRISM_AI_SCHEMA_TEST",
-          1
-        )
-      `;
-
-      console.log("Executing DAX:");
-      console.log(daxQuery);
-
-      // -----------------------------------------
-      // EXECUTE AGAINST SELECTED DATASET
-      // -----------------------------------------
-
-      const response = await fetch(
-        `${POWER_BI_API}/groups/${workspaceId}/datasets/${datasetId}/executeQueries`,
+      const datasetResponse = await fetch(
+        `${POWER_BI_API}/groups/${workspaceId}/datasets/${datasetId}`,
         {
-          method: "POST",
-
+          method: "GET",
           headers: {
             Authorization: `Bearer ${connection.accessToken}`,
-
-            "Content-Type": "application/json",
           },
-
-          body: JSON.stringify({
-            queries: [
-              {
-                query: daxQuery,
-              },
-            ],
-
-            serializerSettings: {
-              includeNulls: true,
-            },
-          }),
         },
       );
 
-      const responseText = await response.text();
+      const datasetText = await datasetResponse.text();
 
-      console.log("Power BI status:", response.status);
+      console.log("DATASET STATUS:", datasetResponse.status);
+      console.log("DATASET RESPONSE:", datasetText);
 
-      console.log("Power BI response:", responseText);
-
-      // -----------------------------------------
-      // HANDLE POWER BI ERROR
-      // -----------------------------------------
-
-      if (!response.ok) {
-        return res.status(response.status).json({
+      if (!datasetResponse.ok) {
+        return res.status(datasetResponse.status).json({
           success: false,
-
-          error: "Unable to query the selected semantic model.",
-
-          powerBiStatus: response.status,
-
-          details: responseText,
+          error: "Unable to read Power BI dataset.",
+          details: datasetText,
         });
       }
 
-      // -----------------------------------------
-      // PARSE RESULT
-      // -----------------------------------------
+      const datasetInfo = JSON.parse(datasetText);
 
-      const result = JSON.parse(responseText);
+      // -------------------------------------------------
+      // STEP 2 - TRY POWER BI MODEL METADATA ENDPOINT
+      // -------------------------------------------------
 
-      // -----------------------------------------
-      // SUCCESS
-      // -----------------------------------------
+      const metadataResponse = await fetch(
+        `${POWER_BI_API}/groups/${workspaceId}/datasets/${datasetId}/metadata`,
+        {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${connection.accessToken}`,
+          },
+        },
+      );
 
-      res.json({
+      const metadataText = await metadataResponse.text();
+
+      console.log("METADATA STATUS:", metadataResponse.status);
+
+      console.log("METADATA RESPONSE:", metadataText);
+
+      let metadata = null;
+
+      if (metadataResponse.ok) {
+        try {
+          metadata = JSON.parse(metadataText);
+        } catch (parseError) {
+          console.log("Metadata response was not valid JSON.");
+        }
+      }
+
+      // -------------------------------------------------
+      // STEP 3 - BUILD SCHEMA OBJECT
+      // -------------------------------------------------
+
+      const schema = {
+        dataset: {
+          id: datasetId,
+          name: datasetInfo?.name || "Unknown Dataset",
+        },
+
+        tables: [],
+
+        rawMetadata: metadata,
+      };
+
+      // -------------------------------------------------
+      // STEP 4 - EXTRACT TABLES/COLUMNS
+      // -------------------------------------------------
+
+      if (metadata) {
+        /*
+         * Handle several possible response shapes.
+         */
+
+        const possibleTables =
+          metadata?.tables ||
+          metadata?.dataset?.tables ||
+          metadata?.model?.tables ||
+          metadata?.result?.tables ||
+          [];
+
+        if (Array.isArray(possibleTables)) {
+          for (const table of possibleTables) {
+            const tableName = table?.name || table?.tableName;
+
+            if (!tableName) {
+              continue;
+            }
+
+            const columns = table?.columns || table?.fields || [];
+
+            schema.tables.push({
+              name: tableName,
+
+              columns: Array.isArray(columns)
+                ? columns.map((column) => ({
+                    name: column?.name || column?.columnName,
+
+                    dataType: column?.dataType || column?.type || "Unknown",
+                  }))
+                : [],
+            });
+          }
+        }
+      }
+
+      // -------------------------------------------------
+      // STEP 5 - LOG DISCOVERED SCHEMA
+      // -------------------------------------------------
+
+      console.log("=================================");
+      console.log("PRISM AI DISCOVERED SCHEMA");
+      console.log(JSON.stringify(schema, null, 2));
+      console.log("=================================");
+
+      // -------------------------------------------------
+      // STEP 6 - SAVE TO CACHE
+      // -------------------------------------------------
+
+      const cacheKey = getSchemaCacheKey(workspaceId, datasetId);
+
+      prismSchemaCache.set(cacheKey, schema);
+
+      // -------------------------------------------------
+      // STEP 7 - RESPONSE
+      // -------------------------------------------------
+
+      return res.json({
         success: true,
 
-        message: "PRISM AI can read the selected semantic model.",
+        message: "Power BI semantic model information retrieved.",
 
         workspaceId,
 
         datasetId,
 
-        readOnly: true,
+        datasetName: datasetInfo?.name || null,
 
-        result,
+        schema,
+
+        cached: true,
       });
     } catch (error) {
-      console.error("SCHEMA TEST ERROR:", error);
+      console.error("=================================");
 
-      res.status(500).json({
+      console.error("PRISM AI SCHEMA ERROR");
+
+      console.error(error);
+
+      console.error("=================================");
+
+      return res.status(500).json({
         success: false,
 
-        error: "Semantic model schema test failed.",
+        error: "Failed to discover Power BI semantic model.",
 
         details: error.message,
       });
     }
   },
 );
+
+// app.get(
+//   "/api/workspaces/:workspaceId/datasets/:datasetId/schema",
+//   async (req, res) => {
+//     const { workspaceId, datasetId } = req.params;
+
+//     const connectionId = req.query.connectionId;
+
+//     console.log("=================================");
+//     console.log("PRISM AI - SCHEMA TEST");
+//     console.log("Workspace ID:", workspaceId);
+//     console.log("Dataset ID:", datasetId);
+//     console.log("Connection ID:", connectionId);
+//     console.log("=================================");
+
+//     // Check connection ID
+//     if (!connectionId) {
+//       return res.status(400).json({
+//         success: false,
+//         error: "Connection ID is missing.",
+//       });
+//     }
+
+//     // Get connection
+//     const connection = powerBiConnections.get(connectionId);
+
+//     // Check authentication
+//     if (!connection || !connection.authenticated || !connection.accessToken) {
+//       return res.status(401).json({
+//         success: false,
+//         error: "Power BI authentication required.",
+//       });
+//     }
+
+//     try {
+//       // -----------------------------------------
+//       // READ-ONLY TEST QUERY
+//       // -----------------------------------------
+
+//       const daxQuery = `
+//         EVALUATE
+//         ROW(
+//           "PRISM_AI_SCHEMA_TEST",
+//           1
+//         )
+//       `;
+
+//       console.log("Executing DAX:");
+//       console.log(daxQuery);
+
+//       // -----------------------------------------
+//       // EXECUTE AGAINST SELECTED DATASET
+//       // -----------------------------------------
+
+//       const response = await fetch(
+//         `${POWER_BI_API}/groups/${workspaceId}/datasets/${datasetId}/executeQueries`,
+//         {
+//           method: "POST",
+
+//           headers: {
+//             Authorization: `Bearer ${connection.accessToken}`,
+
+//             "Content-Type": "application/json",
+//           },
+
+//           body: JSON.stringify({
+//             queries: [
+//               {
+//                 query: daxQuery,
+//               },
+//             ],
+
+//             serializerSettings: {
+//               includeNulls: true,
+//             },
+//           }),
+//         },
+//       );
+
+//       const responseText = await response.text();
+
+//       console.log("Power BI status:", response.status);
+
+//       console.log("Power BI response:", responseText);
+
+//       // -----------------------------------------
+//       // HANDLE POWER BI ERROR
+//       // -----------------------------------------
+
+//       if (!response.ok) {
+//         return res.status(response.status).json({
+//           success: false,
+
+//           error: "Unable to query the selected semantic model.",
+
+//           powerBiStatus: response.status,
+
+//           details: responseText,
+//         });
+//       }
+
+//       // -----------------------------------------
+//       // PARSE RESULT
+//       // -----------------------------------------
+
+//       const result = JSON.parse(responseText);
+
+//       // -----------------------------------------
+//       // SUCCESS
+//       // -----------------------------------------
+
+//       res.json({
+//         success: true,
+
+//         message: "PRISM AI can read the selected semantic model.",
+
+//         workspaceId,
+
+//         datasetId,
+
+//         readOnly: true,
+
+//         result,
+//       });
+//     } catch (error) {
+//       console.error("SCHEMA TEST ERROR:", error);
+
+//       res.status(500).json({
+//         success: false,
+
+//         error: "Semantic model schema test failed.",
+
+//         details: error.message,
+//       });
+//     }
+//   },
+// );
 
 // =====================================================
 // TEST SEMANTIC MODEL SCHEMA DISCOVERY
@@ -1848,120 +2068,693 @@ app.get(
 // PRISM AI - LLM ASK
 // =====================================================
 
+// app.post("/api/ask", async (req, res) => {
+//   try {
+//     const { question, context } = req.body;
+
+//     console.log("=================================");
+//     console.log("PRISM AI LLM REQUEST");
+//     console.log("Question:", question);
+//     console.log("=================================");
+
+//     // -----------------------------------------
+//     // VALIDATE QUESTION
+//     // -----------------------------------------
+
+//     if (!question || question.trim() === "") {
+//       return res.status(400).json({
+//         success: false,
+//         error: "Question is required.",
+//       });
+//     }
+
+//     // -----------------------------------------
+//     // SYSTEM PROMPT
+//     // -----------------------------------------
+
+//     const systemPrompt = `
+// You are Prism AI, an intelligent Business Intelligence assistant.
+
+// You help users understand and analyze data from their Power BI semantic model.
+
+// Your job is to answer the user's business question using ONLY the Power BI data and context provided to you.
+
+// Rules:
+
+// 1. Give clear and concise answers.
+// 2. Use the provided Power BI data whenever relevant.
+// 3. Never invent numbers, dates, products, regions, or business facts.
+// 4. If the provided data is insufficient to answer the question, clearly say that more Power BI data is required.
+// 5. Explain calculations and comparisons in simple business language.
+// 6. Preserve numerical values accurately.
+// 7. If the user asks for a comparison, clearly identify both values and the difference.
+// 8. If the user asks for a percentage change, calculate it accurately when the required values are available.
+// 9. If the user asks for trends, summarize the trend using the provided data.
+// 10. If the user asks a question unrelated to the available Power BI data, explain that the information is not available in the current semantic model.
+// 11. Do not claim that you queried Power BI unless the context explicitly contains the query result.
+// 12. Do not make assumptions about missing data.
+
+// You are a read-only BI assistant.
+// `;
+
+//     // -----------------------------------------
+//     // USER PROMPT
+//     // -----------------------------------------
+
+//     const userPrompt = `
+// User Question:
+// ${question}
+
+// Power BI Context:
+// ${context || "No Power BI context was provided."}
+// `;
+
+//     // -----------------------------------------
+//     // CALL QWEN3
+//     // -----------------------------------------
+
+//     const response = await llmClient.chat.completions.create({
+//       model: LLM_MODEL,
+
+//       messages: [
+//         {
+//           role: "system",
+//           content: systemPrompt,
+//         },
+//         {
+//           role: "user",
+//           content: userPrompt,
+//         },
+//       ],
+
+//       max_tokens: 300,
+//     });
+
+//     const answer = response?.choices?.[0]?.message?.content;
+
+//     if (!answer) {
+//       throw new Error("LLM returned an empty response.");
+//     }
+
+//     console.log("PRISM AI ANSWER:");
+//     console.log(answer);
+//     console.log("=================================");
+
+//     // -----------------------------------------
+//     // RETURN ANSWER
+//     // -----------------------------------------
+
+//     res.json({
+//       success: true,
+//       answer,
+//       model: LLM_MODEL,
+//     });
+//   } catch (error) {
+//     console.error("=================================");
+//     console.error("PRISM AI LLM ERROR");
+//     console.error(error);
+//     console.error("=================================");
+
+//     res.status(500).json({
+//       success: false,
+//       error: "LLM request failed.",
+//       details: error.message,
+//     });
+//   }
+// });
+
+// =====================================================
+// PRISM AI - DISCOVER SEMANTIC MODEL SCHEMA
+// =====================================================
+
+async function discoverSchema({ workspaceId, datasetId, connectionId }) {
+  const cacheKey = getSchemaCacheKey(workspaceId, datasetId);
+
+  // Return cached schema if already discovered
+  if (prismSchemaCache.has(cacheKey)) {
+    console.log("PRISM AI: Using cached schema.");
+    return prismSchemaCache.get(cacheKey);
+  }
+
+  const connection = powerBiConnections.get(connectionId);
+
+  if (!connection || !connection.authenticated || !connection.accessToken) {
+    throw new Error("Power BI authentication is missing.");
+  }
+
+  console.log("=================================");
+  console.log("PRISM AI - DISCOVERING SCHEMA");
+  console.log("Workspace:", workspaceId);
+  console.log("Dataset:", datasetId);
+  console.log("=================================");
+
+  /*
+   * IMPORTANT:
+   * Your current /schema endpoint is a read-only test endpoint.
+   * We will use it as the first schema source.
+   */
+
+  const schemaResponse = await fetch(
+    `${POWER_BI_API}/groups/${workspaceId}/datasets/${datasetId}/schema?connectionId=${encodeURIComponent(
+      connectionId,
+    )}`,
+    {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${connection.accessToken}`,
+      },
+    },
+  );
+
+  const schemaData = await schemaResponse.json();
+
+  console.log("PRISM AI SCHEMA RESPONSE:");
+  console.log(JSON.stringify(schemaData, null, 2));
+
+  if (!schemaResponse.ok) {
+    throw new Error(
+      schemaData?.error || "Unable to discover Power BI semantic model schema.",
+    );
+  }
+
+  /*
+   * Save whatever real schema information the endpoint
+   * returns.
+   */
+  const schema = {
+    workspaceId,
+    datasetId,
+    discoveredAt: new Date().toISOString(),
+    source: "Power BI",
+    data: schemaData,
+  };
+
+  prismSchemaCache.set(cacheKey, schema);
+
+  console.log("PRISM AI: Schema cached successfully.");
+
+  return schema;
+}
+
+// =====================================================
+// PRISM AI - GENERIC POWER BI QUESTION ANSWER
+// =====================================================
+
+// app.post("/api/ask", async (req, res) => {
+//   try {
+//     const {
+//       question,
+//       connectionId,
+//       workspaceId,
+//       datasetId,
+//       workspaceName,
+//       datasetName,
+//     } = req.body;
+
+//     console.log("=================================");
+//     console.log("PRISM AI QUESTION");
+//     console.log("Question:", question);
+//     console.log("Connection ID:", connectionId);
+//     console.log("Workspace ID:", workspaceId);
+//     console.log("Dataset ID:", datasetId);
+//     console.log("=================================");
+
+//     // =====================================================
+//     // VALIDATION
+//     // =====================================================
+
+//     if (!question || question.trim() === "") {
+//       return res.status(400).json({
+//         success: false,
+//         error: "Question is required.",
+//       });
+//     }
+
+//     if (!connectionId) {
+//       return res.status(400).json({
+//         success: false,
+//         error: "Connection ID is required.",
+//       });
+//     }
+
+//     if (!workspaceId || !datasetId) {
+//       return res.status(400).json({
+//         success: false,
+//         error: "Workspace or dataset information is missing.",
+//       });
+//     }
+
+//     // =====================================================
+//     // GET POWER BI CONNECTION
+//     // =====================================================
+
+//     const connection = powerBiConnections.get(connectionId);
+
+//     if (!connection || !connection.authenticated || !connection.accessToken) {
+//       return res.status(401).json({
+//         success: false,
+//         error: "Power BI authentication is missing. Please reconnect.",
+//       });
+//     }
+
+//     const accessToken = connection.accessToken;
+
+//     // =====================================================
+//     // POWER BI MODEL INFORMATION
+//     // =====================================================
+
+//     /*
+//      * We currently know these fields from the working
+//      * Prism AI semantic model/KPI implementation.
+//      *
+//      * This is intentionally kept in one place so we can
+//      * expand the schema later.
+//      */
+
+//     const semanticModel = {
+//       tables: {
+//         Orders: {
+//           columns: [
+//             "Order ID",
+//             "Order Date",
+//             "Ship Date",
+//             "Customer ID",
+//             "Customer Name",
+//             "Segment",
+//             "Country",
+//             "City",
+//             "State",
+//             "Postal Code",
+//             "Region",
+//             "Product ID",
+//             "Category",
+//             "Sub-Category",
+//             "Product Name",
+//             "Sales",
+//             "Quantity",
+//             "Discount",
+//             "Profit",
+//           ],
+//         },
+//       },
+//     };
+
+//     const schemaText = JSON.stringify(semanticModel, null, 2);
+
+//     // =====================================================
+//     // STEP 1
+//     // ASK QWEN TO GENERATE DAX
+//     // =====================================================
+
+//     const daxSystemPrompt = `
+
+// You are Prism AI, a Power BI Business Intelligence assistant.
+
+// Your task is to convert the user's natural-language
+// business question into a READ-ONLY DAX query.
+
+// The DAX query will be executed against a Power BI
+// semantic model.
+
+// SEMANTIC MODEL:
+
+// ${schemaText}
+
+// IMPORTANT RULES:
+
+// 1. Return ONLY the DAX query.
+
+// 2. Do NOT use Markdown.
+
+// 3. Do NOT use code fences.
+
+// 4. The query MUST begin with EVALUATE.
+
+// 5. Only generate READ-ONLY DAX.
+
+// 6. Never generate INSERT, UPDATE, DELETE, DROP,
+//    CREATE, ALTER or TRUNCATE.
+
+// 7. Use only tables and columns listed in the semantic model.
+
+// 8. The main table is 'Orders'.
+
+// 9. Sales is:
+//    SUM('Orders'[Sales])
+
+// 10. Profit is:
+//     SUM('Orders'[Profit])
+
+// 11. Orders are:
+//     COUNTROWS('Orders')
+
+// 12. For comparisons, return the values required
+//     to make the comparison.
+
+// 13. For rankings, use TOPN.
+
+// 14. For monthly analysis, use the Order Date column.
+
+// 15. Keep the result reasonably small.
+
+// 16. Do not return explanations.
+
+// 17. Do not invent columns that are not listed.
+
+// `;
+
+//     const daxUserPrompt = `
+
+// Power BI Workspace:
+// ${workspaceName || workspaceId}
+
+// Power BI Dataset:
+// ${datasetName || datasetId}
+
+// User Question:
+// ${question}
+
+// Generate the DAX query required to answer this question.
+
+// `;
+
+//     console.log("PRISM AI: Generating DAX...");
+
+//     const daxResponse = await llmClient.chat.completions.create({
+//       model: LLM_MODEL,
+
+//       messages: [
+//         {
+//           role: "system",
+//           content: daxSystemPrompt,
+//         },
+
+//         {
+//           role: "user",
+//           content: daxUserPrompt,
+//         },
+//       ],
+
+//       max_tokens: 500,
+//     });
+
+//     let daxQuery = daxResponse?.choices?.[0]?.message?.content?.trim();
+
+//     if (!daxQuery) {
+//       throw new Error("Qwen did not generate a DAX query.");
+//     }
+
+//     // =====================================================
+//     // CLEAN DAX
+//     // =====================================================
+
+//     daxQuery = daxQuery
+//       .replace(/```dax/gi, "")
+//       .replace(/```/g, "")
+//       .trim();
+
+//     console.log("=================================");
+//     console.log("GENERATED DAX:");
+//     console.log(daxQuery);
+//     console.log("=================================");
+
+//     // =====================================================
+//     // SAFETY VALIDATION
+//     // =====================================================
+
+//     const upperDax = daxQuery.toUpperCase();
+
+//     const forbiddenKeywords = [
+//       "INSERT",
+//       "UPDATE",
+//       "DELETE",
+//       "DROP",
+//       "CREATE",
+//       "ALTER",
+//       "TRUNCATE",
+//     ];
+
+//     for (const keyword of forbiddenKeywords) {
+//       if (upperDax.includes(keyword)) {
+//         return res.status(400).json({
+//           success: false,
+
+//           error:
+//             "Generated DAX was rejected because it contains a forbidden operation.",
+//         });
+//       }
+//     }
+
+//     if (!upperDax.startsWith("EVALUATE")) {
+//       return res.status(400).json({
+//         success: false,
+
+//         error: "Generated DAX must start with EVALUATE.",
+//       });
+//     }
+
+//     // =====================================================
+//     // STEP 2
+//     // EXECUTE DAX AGAINST POWER BI
+//     // =====================================================
+
+//     console.log("PRISM AI: Executing DAX against Power BI...");
+
+//     const powerBIResponse = await fetch(
+//       `${POWER_BI_API}/groups/${workspaceId}/datasets/${datasetId}/executeQueries`,
+
+//       {
+//         method: "POST",
+
+//         headers: {
+//           Authorization: `Bearer ${accessToken}`,
+
+//           "Content-Type": "application/json",
+//         },
+
+//         body: JSON.stringify({
+//           queries: [
+//             {
+//               query: daxQuery,
+//             },
+//           ],
+
+//           serializerSettings: {
+//             includeNulls: true,
+//           },
+//         }),
+//       },
+//     );
+
+//     const responseText = await powerBIResponse.text();
+
+//     console.log("POWER BI STATUS:", powerBIResponse.status);
+
+//     console.log("POWER BI RESPONSE:", responseText);
+
+//     if (!powerBIResponse.ok) {
+//       return res.status(400).json({
+//         success: false,
+
+//         error: "Power BI could not execute the generated DAX.",
+
+//         daxQuery: daxQuery,
+
+//         details: responseText,
+//       });
+//     }
+
+//     const powerBIResult = JSON.parse(responseText);
+
+//     // =====================================================
+//     // CHECK RESULT
+//     // =====================================================
+
+//     const rows = powerBIResult?.results?.[0]?.tables?.[0]?.rows;
+
+//     if (!rows || rows.length === 0) {
+//       return res.json({
+//         success: true,
+
+//         answer:
+//           "I could not find any matching data in the selected Power BI semantic model.",
+
+//         daxQuery: daxQuery,
+
+//         powerBIResult: powerBIResult,
+
+//         model: LLM_MODEL,
+//       });
+//     }
+
+//     // =====================================================
+//     // STEP 3
+//     // SEND REAL POWER BI RESULT TO QWEN
+//     // =====================================================
+
+//     const answerSystemPrompt = `
+
+// You are Prism AI, an intelligent Business Intelligence assistant.
+
+// Answer the user's question using ONLY the Power BI
+// query result provided below.
+
+// Rules:
+
+// 1. Never invent numbers.
+
+// 2. Never invent business facts.
+
+// 3. Use the actual Power BI result.
+
+// 4. Give a clear and concise answer.
+
+// 5. For comparisons, clearly state both values
+//    and the difference.
+
+// 6. For percentage changes, calculate accurately.
+
+// 7. For rankings, clearly identify the top results.
+
+// 8. For trends, summarize the returned data.
+
+// 9. If the result does not contain enough information,
+//    clearly say so.
+
+// 10. Do not mention DAX unless the user asks.
+
+// 11. Do not mention internal implementation details.
+
+// 12. Do not make assumptions.
+
+// `;
+
+//     const answerUserPrompt = `
+
+// User Question:
+// ${question}
+
+// Power BI Query Result:
+// ${JSON.stringify(rows, null, 2)}
+
+// `;
+
+//     console.log("PRISM AI: Generating final answer...");
+
+//     const answerResponse = await llmClient.chat.completions.create({
+//       model: LLM_MODEL,
+
+//       messages: [
+//         {
+//           role: "system",
+
+//           content: answerSystemPrompt,
+//         },
+
+//         {
+//           role: "user",
+
+//           content: answerUserPrompt,
+//         },
+//       ],
+
+//       max_tokens: 400,
+//     });
+
+//     const answer = answerResponse?.choices?.[0]?.message?.content?.trim();
+
+//     if (!answer) {
+//       throw new Error("Qwen returned an empty answer.");
+//     }
+
+//     // =====================================================
+//     // FINAL RESPONSE
+//     // =====================================================
+
+//     console.log("=================================");
+//     console.log("PRISM AI FINAL ANSWER:");
+//     console.log(answer);
+//     console.log("=================================");
+
+//     return res.json({
+//       success: true,
+
+//       answer: answer,
+
+//       daxQuery: daxQuery,
+
+//       powerBIResult: powerBIResult,
+
+//       model: LLM_MODEL,
+//     });
+//   } catch (error) {
+//     console.error("=================================");
+//     console.error("PRISM AI ERROR");
+//     console.error(error);
+//     console.error("=================================");
+
+//     return res.status(500).json({
+//       success: false,
+
+//       error: "Prism AI request failed.",
+
+//       details: error.message,
+//     });
+//   }
+// });
+
+// =====================================================
+// PRISM AI - LLM QUESTION HANDLER
+// =====================================================
 app.post("/api/ask", async (req, res) => {
+  const { question, connectionId, workspaceId, datasetId } = req.body;
+
+  const connection = powerBiConnections.get(connectionId);
+  if (!connection || !connection.authenticated || !connection.accessToken) {
+    return res
+      .status(401)
+      .json({ success: false, error: "Power BI authentication required." });
+  }
+
   try {
-    const { question, context } = req.body;
-
-    console.log("=================================");
-    console.log("PRISM AI LLM REQUEST");
-    console.log("Question:", question);
-    console.log("=================================");
-
-    // -----------------------------------------
-    // VALIDATE QUESTION
-    // -----------------------------------------
-
-    if (!question || question.trim() === "") {
-      return res.status(400).json({
-        success: false,
-        error: "Question is required.",
-      });
+    // Step 1: Retrieve schema (cached or fresh)
+    const schemaKey = `${workspaceId}:${datasetId}`;
+    let schema = prismSchemaCache.get(schemaKey);
+    if (!schema) {
+      const schemaResponse = await fetch(
+        `${POWER_BI_API}/groups/${workspaceId}/datasets/${datasetId}/metadata`,
+        { headers: { Authorization: `Bearer ${connection.accessToken}` } },
+      );
+      schema = await schemaResponse.json();
+      prismSchemaCache.set(schemaKey, schema);
     }
 
-    // -----------------------------------------
-    // SYSTEM PROMPT
-    // -----------------------------------------
-
-    const systemPrompt = `
-You are Prism AI, an intelligent Business Intelligence assistant.
-
-You help users understand and analyze data from their Power BI semantic model.
-
-Your job is to answer the user's business question using ONLY the Power BI data and context provided to you.
-
-Rules:
-
-1. Give clear and concise answers.
-2. Use the provided Power BI data whenever relevant.
-3. Never invent numbers, dates, products, regions, or business facts.
-4. If the provided data is insufficient to answer the question, clearly say that more Power BI data is required.
-5. Explain calculations and comparisons in simple business language.
-6. Preserve numerical values accurately.
-7. If the user asks for a comparison, clearly identify both values and the difference.
-8. If the user asks for a percentage change, calculate it accurately when the required values are available.
-9. If the user asks for trends, summarize the trend using the provided data.
-10. If the user asks a question unrelated to the available Power BI data, explain that the information is not available in the current semantic model.
-11. Do not claim that you queried Power BI unless the context explicitly contains the query result.
-12. Do not make assumptions about missing data.
-
-You are a read-only BI assistant.
+    // Step 2: Build prompt
+    const prompt = `
+You are a BI assistant analyzing Power BI data.
+Schema: ${JSON.stringify(schema)}
+User question: ${question}
+Answer clearly using dataset context.
 `;
 
-    // -----------------------------------------
-    // USER PROMPT
-    // -----------------------------------------
-
-    const userPrompt = `
-User Question:
-${question}
-
-Power BI Context:
-${context || "No Power BI context was provided."}
-`;
-
-    // -----------------------------------------
-    // CALL QWEN3
-    // -----------------------------------------
-
+    // Step 3: Call Hugging Face Qwen model
     const response = await llmClient.chat.completions.create({
       model: LLM_MODEL,
-
-      messages: [
-        {
-          role: "system",
-          content: systemPrompt,
-        },
-        {
-          role: "user",
-          content: userPrompt,
-        },
-      ],
-
-      max_tokens: 300,
+      messages: [{ role: "user", content: prompt }],
     });
 
-    const answer = response?.choices?.[0]?.message?.content;
+    const answer = response.choices[0].message.content;
 
-    if (!answer) {
-      throw new Error("LLM returned an empty response.");
-    }
-
-    console.log("PRISM AI ANSWER:");
-    console.log(answer);
-    console.log("=================================");
-
-    // -----------------------------------------
-    // RETURN ANSWER
-    // -----------------------------------------
-
-    res.json({
-      success: true,
-      answer,
-      model: LLM_MODEL,
-    });
+    res.json({ success: true, answer });
   } catch (error) {
-    console.error("=================================");
-    console.error("PRISM AI LLM ERROR");
-    console.error(error);
-    console.error("=================================");
-
-    res.status(500).json({
-      success: false,
-      error: "LLM request failed.",
-      details: error.message,
-    });
+    console.error("LLM ERROR:", error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
+
+// =====================================================
+// PRISM AI - LLM QUESTION HANDLER
+// =====================================================
 
 app.listen(PORT, () => {
   console.log("=================================");
