@@ -2454,7 +2454,7 @@ ROW(
       powerBiResponse.data?.results?.[0]?.tables?.[0]?.rows || [];
 
     console.log("=================================");
-    console.log("PRISM AI - POWER BI RESULT");
+    console.log("AI - POWER BI RESULT");
     console.log(JSON.stringify(queryResult, null, 2));
     console.log("=================================");
 
@@ -2503,8 +2503,79 @@ Rules:
     // }
 
     console.log("=================================");
-    console.log("PRISM AI - FINAL ANSWER");
+    console.log("AI - FINAL ANSWER");
     console.log(answer);
+    console.log("=================================");
+
+    // STEP 6 - ASK GEMINI FOR VISUALIZATION SPEC
+
+    const visualizationPrompt = `
+You are PRISM AI's visualization planner.
+
+USER QUESTION:
+${question}
+
+POWER BI RESULT:
+${JSON.stringify(queryResult, null, 2)}
+
+Determine the most useful visualization for the returned data.
+
+Return ONLY valid JSON in exactly this format:
+
+{
+  "visualType": "kpi|bar|line|pie|table|none",
+  "title": "string",
+  "categoryField": "string or null",
+  "valueField": "string or null",
+  "insight": "short string"
+}
+
+Rules:
+- Use ONLY field names that exist in the Power BI result.
+- If there is one numeric result, use "kpi".
+- If there is a date/time field and numeric field, prefer "line".
+- If there is a category field and numeric field, prefer "bar".
+- Use "pie" only when categories represent parts of a whole.
+- Use "table" when multiple fields/rows are more useful than a chart.
+- Use "none" if no meaningful visualization can be created.
+- Never invent data.
+- Never invent field names.
+- Keep the insight short.
+- Return ONLY JSON.
+`;
+
+    const visualizationResponse =
+      await llmModel.generateContent(visualizationPrompt);
+
+    const visualizationResult = await visualizationResponse.response;
+
+    let visualizationText = visualizationResult.text()?.trim();
+
+    visualizationText = visualizationText
+      .replace(/^```json\s*/i, "")
+      .replace(/^```\s*/i, "")
+      .replace(/\s*```$/i, "")
+      .trim();
+
+    let visualization = null;
+
+    try {
+      visualization = JSON.parse(visualizationText);
+    } catch (e) {
+      console.error("AI - INVALID VISUALIZATION JSON:", visualizationText);
+
+      visualization = {
+        visualType: "none",
+        title: "",
+        categoryField: null,
+        valueField: null,
+        insight: "",
+      };
+    }
+
+    console.log("=================================");
+    console.log("AI - VISUALIZATION");
+    console.log(JSON.stringify(visualization, null, 2));
     console.log("=================================");
 
     // =================================================
@@ -2517,6 +2588,7 @@ Rules:
       answer,
       dax: daxQuery,
       data: queryResult,
+      visualization,
     });
   } catch (error) {
     console.error("=================================");
