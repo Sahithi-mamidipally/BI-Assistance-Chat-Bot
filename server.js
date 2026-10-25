@@ -2628,11 +2628,14 @@ You are PRISM AI's visualization planner.
 USER QUESTION:
 ${question}
 
+USER RESPONSE MODE:
+${responseMode}
+
+USER-SELECTED CHART TYPE:
+${chartType}
+
 POWER BI RESULT:
 ${JSON.stringify(queryResult, null, 2)}
-
-Choose the best visualization based on the user's question
-and the actual structure of the returned data.
 
 Return ONLY valid JSON in exactly this format:
 
@@ -2648,23 +2651,21 @@ Return ONLY valid JSON in exactly this format:
 }
 
 Rules:
+- If USER RESPONSE MODE is "text", return visualType "none".
+- If USER RESPONSE MODE is "visualization", use the USER-SELECTED CHART TYPE.
+- Allowed chart types are: kpi, bar, line, pie, table.
+- Do not choose a different chart type from the one requested.
+- If the requested chart cannot be supported by the returned data, use visualType "none".
 - Use ONLY field names present in the Power BI result.
-- Power BI result fields may have names such as "[Location]" or "[TotalSales]".
-  Use the exact field names as returned.
-- For a single numeric result, use "kpi".
-- For a time-based trend with a numeric field, use "line".
-- For a category and numeric measure, use "bar" by default.
-- Use "pie" when the question asks for proportions or contribution
-  and the data represents parts of a whole.
-- Use "table" when comparing multiple fields or when a chart is unsuitable.
-- Use "none" when the result cannot support a meaningful visualization.
-- Set categoryField to the category column and valueField to the numeric
-  measure for bar, line, and pie charts.
-- Set xAxisTitle to the category/time field and yAxisTitle to the
-  numeric measure for bar and line charts.
-- Set showDataLabels to true for charts with numeric values.
-- Do not select a chart if the required category or numeric field is missing.
-- Never invent field names, data, or values.
+- Power BI field names may look like "[Location]" or "[TotalSales]".
+  Use the exact field names returned.
+- For kpi, select a numeric value field when available.
+- For bar, line, and pie, identify suitable category and numeric fields.
+- For table, return all relevant fields through the existing result data.
+- For line charts, prefer a time field and numeric value field.
+- For pie charts, use a category and numeric field representing parts of a whole.
+- If the data is empty or unsuitable, use visualType "none".
+- Never invent fields, values, or data.
 - Return ONLY valid JSON without markdown fences.
 `;
 
@@ -2697,8 +2698,35 @@ Rules:
       };
     }
 
+    // Enforce the requested response mode and chart type
+    if (responseMode === "text") {
+      visualization = {
+        visualType: "none",
+        title: "",
+        categoryField: null,
+        valueField: null,
+        insight: "",
+      };
+    } else if (responseMode === "visualization") {
+      const allowedChartTypes = ["kpi", "bar", "line", "pie", "table"];
+
+      if (
+        allowedChartTypes.includes(chartType) &&
+        visualization?.visualType !== chartType
+      ) {
+        visualization = {
+          ...visualization,
+          visualType: "none",
+          title: "",
+          insight:
+            "The requested visualization could not be generated with the returned data.",
+        };
+      }
+    }
+
     console.log("=================================");
     console.log("AI - VISUALIZATION");
+
     console.log(JSON.stringify(visualization, null, 2));
     console.log("=================================");
 
