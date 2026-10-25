@@ -2509,6 +2509,41 @@ Rules:
 
     // STEP 6 - ASK GEMINI FOR VISUALIZATION SPEC
 
+    //     const visualizationPrompt = `
+    // You are PRISM AI's visualization planner.
+
+    // USER QUESTION:
+    // ${question}
+
+    // POWER BI RESULT:
+    // ${JSON.stringify(queryResult, null, 2)}
+
+    // Determine the most useful visualization for the returned data.
+
+    // Return ONLY valid JSON in exactly this format:
+
+    // {
+    //   "visualType": "kpi|bar|line|pie|table|none",
+    //   "title": "string",
+    //   "categoryField": "string or null",
+    //   "valueField": "string or null",
+    //   "insight": "short string"
+    // }
+
+    // Rules:
+    // - Use ONLY field names that exist in the Power BI result.
+    // - If there is one numeric result, use "kpi".
+    // - If there is a date/time field and numeric field, prefer "line".
+    // - If there is a category field and numeric field, prefer "bar".
+    // - Use "pie" only when categories represent parts of a whole.
+    // - Use "table" when multiple fields/rows are more useful than a chart.
+    // - Use "none" if no meaningful visualization can be created.
+    // - Never invent data.
+    // - Never invent field names.
+    // - Keep the insight short.
+    // - Return ONLY JSON.
+    // `;
+
     const visualizationPrompt = `
 You are PRISM AI's visualization planner.
 
@@ -2518,7 +2553,8 @@ ${question}
 POWER BI RESULT:
 ${JSON.stringify(queryResult, null, 2)}
 
-Determine the most useful visualization for the returned data.
+Choose the best visualization based on the user's question
+and the actual structure of the returned data.
 
 Return ONLY valid JSON in exactly this format:
 
@@ -2527,21 +2563,31 @@ Return ONLY valid JSON in exactly this format:
   "title": "string",
   "categoryField": "string or null",
   "valueField": "string or null",
+  "showDataLabels": true,
+  "xAxisTitle": "string or null",
+  "yAxisTitle": "string or null",
   "insight": "short string"
 }
 
 Rules:
-- Use ONLY field names that exist in the Power BI result.
-- If there is one numeric result, use "kpi".
-- If there is a date/time field and numeric field, prefer "line".
-- If there is a category field and numeric field, prefer "bar".
-- Use "pie" only when categories represent parts of a whole.
-- Use "table" when multiple fields/rows are more useful than a chart.
-- Use "none" if no meaningful visualization can be created.
-- Never invent data.
-- Never invent field names.
-- Keep the insight short.
-- Return ONLY JSON.
+- Use ONLY field names present in the Power BI result.
+- Power BI result fields may have names such as "[Location]" or "[TotalSales]".
+  Use the exact field names as returned.
+- For a single numeric result, use "kpi".
+- For a time-based trend with a numeric field, use "line".
+- For a category and numeric measure, use "bar" by default.
+- Use "pie" when the question asks for proportions or contribution
+  and the data represents parts of a whole.
+- Use "table" when comparing multiple fields or when a chart is unsuitable.
+- Use "none" when the result cannot support a meaningful visualization.
+- Set categoryField to the category column and valueField to the numeric
+  measure for bar, line, and pie charts.
+- Set xAxisTitle to the category/time field and yAxisTitle to the
+  numeric measure for bar and line charts.
+- Set showDataLabels to true for charts with numeric values.
+- Do not select a chart if the required category or numeric field is missing.
+- Never invent field names, data, or values.
+- Return ONLY valid JSON without markdown fences.
 `;
 
     const visualizationResponse =
