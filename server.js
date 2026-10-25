@@ -2300,7 +2300,46 @@ app.get("/api/test-gemini", async (req, res) => {
 });
 
 app.post("/api/ask", async (req, res) => {
-  const { question, connectionId, workspaceId, datasetId } = req.body;
+  // const { question, connectionId, workspaceId, datasetId } = req.body;
+
+  const {
+    question,
+    connectionId,
+    workspaceId,
+    datasetId,
+    responseMode = "auto",
+    chartType = "auto",
+  } = req.body;
+
+  // Handle greetings without querying Power BI
+  const normalizedQuestion = question?.trim().toLowerCase();
+
+  const greetings = [
+    "hi",
+    "hello",
+    "hey",
+    "good morning",
+    "good afternoon",
+    "good evening",
+  ];
+
+  if (greetings.includes(normalizedQuestion)) {
+    return res.json({
+      success: true,
+      question,
+      answer:
+        "Hi! 👋 I'm your BI Assistant. What would you like to know about your Power BI data?",
+      dax: null,
+      data: [],
+      visualization: {
+        visualType: "none",
+        title: "",
+        categoryField: null,
+        valueField: null,
+        insight: "",
+      },
+    });
+  }
 
   if (!question || !connectionId || !workspaceId || !datasetId) {
     return res.status(400).json({
@@ -2458,6 +2497,45 @@ ROW(
     console.log(JSON.stringify(queryResult, null, 2));
     console.log("=================================");
 
+    // Handle brief-text response mode
+    if (responseMode === "text") {
+      const textPrompt = `
+You are PRISM AI, a helpful Power BI data assistant.
+
+User question:
+${question}
+
+Power BI query result:
+${JSON.stringify(queryResult, null, 2)}
+
+Answer the user's question concisely using only the actual query result.
+Do not generate charts or visualization instructions.
+Do not invent values.
+`;
+
+      const textResponse = await llmModel.generateContent(textPrompt);
+      const textResult = await textResponse.response;
+      const textAnswer = textResult.text()?.trim();
+
+      if (!textAnswer) {
+        throw new Error("AI did not generate a text answer.");
+      }
+
+      return res.json({
+        success: true,
+        question,
+        answer: textAnswer,
+        dax: daxQuery,
+        data: queryResult,
+        visualization: {
+          visualType: "none",
+          title: "",
+          categoryField: null,
+          valueField: null,
+          insight: "",
+        },
+      });
+    }
     // =================================================
     // STEP 5 - ASK QWEN TO EXPLAIN REAL RESULT
     // =================================================
