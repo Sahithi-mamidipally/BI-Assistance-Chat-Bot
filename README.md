@@ -75,7 +75,7 @@ PRISM AI consists of two separately maintained projects:
 
 ## System Architecture
 
-![PRISM AI Architecture](assets/prism-architecture.png)
+![PRISM AI Architecture](assets/Bot architecture.png)
 
 ### How Frontend and Backend Communicate
 
