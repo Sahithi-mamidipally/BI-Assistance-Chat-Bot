@@ -73,9 +73,12 @@ PRISM AI consists of two separately maintained projects:
 ```
 
 
+
 ## System Architecture
 
-![PRISM AI Architecture](assets/Bot architecture.png)
+The following diagram illustrates how the BI Assistence frontend, backend, Microsoft Entra ID, Google Gemini API, and Microsoft Power BI work together.
+
+![BI Assistence Architecture](assets/Bot%20architecture.png)
 
 ### How Frontend and Backend Communicate
 
