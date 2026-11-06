@@ -1,4 +1,4 @@
-#  Power BI BI Assistant Backend
+#  Power BI Assistant Backend
 
 An AI-powered backend service for PRISM AI, a conversational Power BI assistant. This Node.js application connects Microsoft Power BI semantic models with Google Gemini AI, allowing users to ask natural-language questions and receive data-driven answers, DAX queries, KPIs, and visualization instructions.
 
